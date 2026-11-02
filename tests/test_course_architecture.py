@@ -5,7 +5,7 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import subprocess
 import sys
 import tempfile
@@ -103,11 +103,23 @@ state=zju.DownloadState(root)
 for i in range(12):
  state.put(prefix+str(i),dict(path=prefix+str(i)+'.md',kind='transcripts',sub_id=1,format='md',status='pending'))
 '''
-        processes=[subprocess.Popen([sys.executable,'-B','-c',code,str(directory),str(i)+'-'],cwd=SCRIPT.parent,
-                    stdout=subprocess.PIPE,stderr=subprocess.PIPE) for i in range(4)]
-        for process in processes:
-            out,err=process.communicate(timeout=30)
-            self.assertEqual(process.returncode,0,err.decode())
+        processes=[]
+        results=[]
+        try:
+            for i in range(4):
+                processes.append(subprocess.Popen([sys.executable,'-B','-c',code,str(directory),str(i)+'-'],
+                    cwd=SCRIPT.parent,stdout=subprocess.PIPE,stderr=subprocess.PIPE))
+            for process in processes:
+                _,err=process.communicate(timeout=30)
+                results.append((process.returncode,err.decode(errors='replace')))
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+            for process in processes:
+                process.communicate()
+        for returncode,err in results:
+            self.assertEqual(returncode,0,err)
         state=zju.DownloadState(directory);self.assertEqual(len(state.data),48)
         previous=state.path.read_bytes()
         with mock.patch.object(zju.os,'replace',side_effect=OSError('write failure')):
@@ -117,6 +129,31 @@ for i in range(12):
         state.path.write_text('{broken')
         with self.assertRaises(zju.ZjuError):zju.DownloadState(directory)
         self.assertEqual(state.path.read_text(),'{broken')
+
+    def test_resolved_windows_paths_allow_equivalent_namespaces_not_escapes(self):
+        # Windows realpath can retain the extended prefix when a concurrent
+        # atomic replacement changes the result of its second filesystem probe.
+        directory=self.root/'course'
+        target=directory/'.zju/downloads.json'
+        cases=[
+            (r'C:\courses\course',r'\\?\C:\courses\course\.zju\downloads.json',True),
+            (r'\\?\C:\courses\course',r'C:\courses\course\.zju\downloads.json',True),
+            (r'\\server\share\course',r'\\?\UNC\server\share\course\.zju\downloads.json',True),
+            (r'\\?\UNC\server\share\course',r'\\server\share\course\.zju\downloads.json',True),
+            (r'C:\courses\course',r'\\?\C:\courses\course-other\downloads.json',False),
+            (r'C:\courses\course',r'\\?\D:\courses\course\downloads.json',False),
+            (r'\\server\share\course',r'\\?\UNC\server\other\course\downloads.json',False),
+        ]
+        for root,resolved_target,allowed in cases:
+            with self.subTest(root=root,target=resolved_target):
+                def resolve(path):
+                    return PureWindowsPath(resolved_target if path==target else root)
+                with mock.patch.object(Path,'resolve',autospec=True,side_effect=resolve):
+                    if allowed:
+                        self.assertEqual(zju.context_path(directory,'.zju/downloads.json'),target)
+                    else:
+                        with self.assertRaises(ValueError):
+                            zju.context_path(directory,'.zju/downloads.json')
 
     def test_user_symlink_and_reserved_state_protection(self):
         directory=self.root/'course';initialize(zju,directory)

@@ -2466,7 +2466,21 @@ def context_path(directory: Path, value) -> Path:
     if ".." in path.parts:
         raise ValueError("资料路径越界")
     target = directory / path
-    target.resolve().relative_to(directory.resolve())
+
+    def comparable(candidate):
+        resolved = candidate.resolve()
+        # Windows realpath may retain \\?\ during concurrent file replacement.
+        # Normalize only the comparison; preserve resolved symlink targets and
+        # the original filesystem path (including long-path support).
+        if isinstance(resolved, PureWindowsPath):
+            text = str(resolved)
+            if text[:8].upper() == "\\\\?\\UNC\\":
+                return PureWindowsPath("\\\\" + text[8:])
+            if text.startswith("\\\\?\\") and re.match(r"^[A-Za-z]:\\", text[4:]):
+                return PureWindowsPath(text[4:])
+        return resolved
+
+    comparable(target).relative_to(comparable(directory))
     return target
 
 
